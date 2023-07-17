@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0
-
 menuconfig SAMPLES_RUST
 	bool "Rust samples"
 	depends on RUST
@@ -146,6 +145,16 @@ config SAMPLE_RUST_ECHO_SERVER
 
 	  To compile this as a module, choose M here:
 	  the module will be called rust_echo_server.
+
+	  If unsure, say N.
+
+config SAMPLE_RUST_SCULL
+	tristate "Scull module"
+	help
+	  This option builds the Rust scull  module sample.
+
+	  To compile this as a module, choose M here:
+	  the module will be called scull.
 
 	  If unsure, say N.
 
