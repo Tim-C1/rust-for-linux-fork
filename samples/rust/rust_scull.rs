@@ -1,7 +1,7 @@
 //! Scull module in Rust.
 use kernel::io_buffer::{IoBufferReader, IoBufferWriter};
 use kernel::prelude::*;
-use kernel::sync::{Arc, CondVar, UniqueArc, Mutex};
+use kernel::sync::{Arc, UniqueArc, Mutex, ArcBorrow};
 use kernel::user_ptr::UserSlicePtrWriter;
 use kernel::{file, miscdev};
 use kernel::file::{File, IoctlHandler};
@@ -24,23 +24,18 @@ struct ScullDataInner {
 }
 
 struct ScullData {
-    cond: CondVar,
     number: u32,
-    inner: Mutex<ScullDataInner>,
+    scull_inner: Mutex<ScullDataInner>,
 }
 
 impl ScullData {
     fn try_new(dev_id: u32) -> Result<Arc<Self>> {
         let mut data = Pin::from(UniqueArc::try_new(Self {
-            cond: unsafe { CondVar::new() },
             number: dev_id,
-            inner: unsafe { Mutex::new(ScullDataInner { data: Vec::new() }) },
+            scull_inner: unsafe { Mutex::new(ScullDataInner { data: Vec::new() }) },
         })?);
 
-        let pinned = unsafe { data.as_mut().map_unchecked_mut(|d| &mut d.cond) };
-        kernel::condvar_init!(pinned, "ScullData::cond");
-
-        let pinned = unsafe { data.as_mut().map_unchecked_mut(|d| &mut d.inner) };
+        let pinned = unsafe { data.as_mut().map_unchecked_mut(|d| &mut d.scull_inner) };
         kernel::mutex_init!(pinned, "Sculldata::inner");
 
         Ok(data.into())
@@ -54,7 +49,7 @@ struct Scull {
 struct ScullIoctlHandler;
 
 impl IoctlHandler for ScullIoctlHandler {
-    type Target<'a> = ();
+    type Target<'a> = ArcBorrow<'a, ScullData>;
 
     fn read(
         _this: Self::Target<'_>,
@@ -62,13 +57,12 @@ impl IoctlHandler for ScullIoctlHandler {
         _cmd: u32,
         _writer: &mut UserSlicePtrWriter,
     ) -> Result<i32> {
-        pr_info!("read ioctl\n");
-        if let Err(e) = _writer.write_slice(b"h") {
-            pr_info!("opps!!, {:?}\n", e);
-            Ok(0)
+        let len = _this.scull_inner.lock().data.len();
+        if let Err(e) = _writer.write(&len) {
+            pr_info!("Error, {:?}, size of writer {}\n", e, _writer.len());
+            Err(e)
         } else {
-            pr_info!("ok\n");
-            Ok(-1)
+            Ok(0)
         }
     }
 }
@@ -81,7 +75,7 @@ impl file::Operations for Scull {
     fn open(context: &Self::OpenData, file: &file::File) -> Result<Self::Data> {
         pr_info!("File for device {} was opened\n", context.number);
         if file.flags() & file::flags::O_ACCMODE == file::flags::O_WRONLY {
-            context.inner.lock().data.clear();
+            context.scull_inner.lock().data.clear();
         }
         Ok(context.clone())
     }
@@ -94,7 +88,7 @@ impl file::Operations for Scull {
     ) -> Result<usize> {
         pr_info!("File for device {} was read\n", _data.number);
         let offset = _offset.try_into()?;
-        let vec = _data.inner.lock();
+        let vec = _data.scull_inner.lock();
         let len = core::cmp::min(_writer.len(), vec.data.len().saturating_sub(offset));
         _writer.write_slice(&vec.data[offset..][..len])?;
         Ok(len)
@@ -110,7 +104,7 @@ impl file::Operations for Scull {
         let offset = _offset.try_into()?;
         let len = _reader.len();
         let new_len = len.checked_add(offset).ok_or(EINVAL)?;
-        let mut vec = _data.inner.lock();
+        let mut vec = _data.scull_inner.lock();
         if new_len > vec.data.len() {
             vec.data.try_resize(new_len, 0)?;
         }
@@ -124,7 +118,7 @@ impl file::Operations for Scull {
         _cmd: &mut file::IoctlCommand,
     ) -> Result<i32> {
         // implement _IOR(type, nr, datatype), which return "receive from scull"
-        _cmd.dispatch::<ScullIoctlHandler>((), _file)
+        _cmd.dispatch::<ScullIoctlHandler>(_data, _file)
     }
 }
 
