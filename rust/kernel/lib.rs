@@ -44,6 +44,8 @@ pub mod std_vendor;
 pub mod str;
 pub mod sync;
 pub mod types;
+#[doc(hidden)]
+pub mod wait;
 
 #[doc(hidden)]
 pub use bindings;

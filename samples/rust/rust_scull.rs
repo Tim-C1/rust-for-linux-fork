@@ -5,6 +5,7 @@ use kernel::sync::{Arc, UniqueArc, Mutex, ArcBorrow};
 use kernel::user_ptr::UserSlicePtrWriter;
 use kernel::{file, miscdev};
 use kernel::file::{File, IoctlHandler};
+use kernel::wait::WaitQueue;
 
 module! {
     type: Scull,
@@ -21,6 +22,7 @@ module! {
 
 struct ScullDataInner {
     data: Vec<u8>,
+    rq: WaitQueue,
 }
 
 struct ScullData {
@@ -32,7 +34,10 @@ impl ScullData {
     fn try_new(dev_id: u32) -> Result<Arc<Self>> {
         let mut data = Pin::from(UniqueArc::try_new(Self {
             number: dev_id,
-            scull_inner: unsafe { Mutex::new(ScullDataInner { data: Vec::new() }) },
+            scull_inner: unsafe { Mutex::new(ScullDataInner {
+                data: Vec::new(),
+                rq: WaitQueue::try_new(format_args!("scullrq")).unwrap(),
+            }) },
         })?);
 
         let pinned = unsafe { data.as_mut().map_unchecked_mut(|d| &mut d.scull_inner) };
@@ -72,11 +77,11 @@ impl file::Operations for Scull {
     type Data = Arc<ScullData>;
     type OpenData = Arc<ScullData>;
 
-    fn open(context: &Self::OpenData, file: &file::File) -> Result<Self::Data> {
+    fn open(context: &Self::OpenData, _file: &file::File) -> Result<Self::Data> {
         pr_info!("File for device {} was opened\n", context.number);
-        if file.flags() & file::flags::O_ACCMODE == file::flags::O_WRONLY {
-            context.scull_inner.lock().data.clear();
-        }
+        // if file.flags() & file::flags::O_ACCMODE == file::flags::O_WRONLY {
+        //     context.scull_inner.lock().data.clear();
+        // }
         Ok(context.clone())
     }
 
@@ -86,11 +91,16 @@ impl file::Operations for Scull {
         _writer: &mut impl IoBufferWriter,
         _offset: u64,
     ) -> Result<usize> {
-        pr_info!("File for device {} was read\n", _data.number);
+        pr_info!("File for device {} was read, offset: {}\n", _data.number, _offset);
         let offset = _offset.try_into()?;
-        let vec = _data.scull_inner.lock();
-        let len = core::cmp::min(_writer.len(), vec.data.len().saturating_sub(offset));
-        _writer.write_slice(&vec.data[offset..][..len])?;
+        let mut sinner = _data.scull_inner.lock();
+        let len = core::cmp::min(_writer.len(), sinner.data.len().saturating_sub(offset));
+        if len == 0 {
+            let ref mut myrq = sinner.rq;
+            myrq.try_wait();
+            pr_info!("I am back\n");
+        }
+        _writer.write_slice(&sinner.data[offset..][..len])?;
         Ok(len)
     }
 
@@ -109,6 +119,8 @@ impl file::Operations for Scull {
             vec.data.try_resize(new_len, 0)?;
         }
         _reader.read_slice(&mut vec.data[offset..][..len])?;
+        vec.rq.try_wake();
+        pr_info!("wake up a reader\n");
         Ok(len)
     }
 
