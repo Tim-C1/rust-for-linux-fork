@@ -6,7 +6,9 @@ use kernel::user_ptr::UserSlicePtrWriter;
 use kernel::{file, miscdev};
 use kernel::file::{File, IoctlHandler};
 use kernel::wait::WaitQueue;
+use core::cell::RefCell;
 
+unsafe impl Sync for ScullData {}
 module! {
     type: Scull,
     name: "scull",
@@ -22,11 +24,11 @@ module! {
 
 struct ScullDataInner {
     data: Vec<u8>,
-    rq: WaitQueue,
 }
 
 struct ScullData {
     number: u32,
+    rq: RefCell<WaitQueue>,
     scull_inner: Mutex<ScullDataInner>,
 }
 
@@ -34,9 +36,9 @@ impl ScullData {
     fn try_new(dev_id: u32) -> Result<Arc<Self>> {
         let mut data = Pin::from(UniqueArc::try_new(Self {
             number: dev_id,
+            rq: RefCell::new(WaitQueue::try_new(format_args!("scullrq")).unwrap()),
             scull_inner: unsafe { Mutex::new(ScullDataInner {
                 data: Vec::new(),
-                rq: WaitQueue::try_new(format_args!("scullrq")).unwrap(),
             }) },
         })?);
 
@@ -96,10 +98,12 @@ impl file::Operations for Scull {
         let mut sinner = _data.scull_inner.lock();
         let len = core::cmp::min(_writer.len(), sinner.data.len().saturating_sub(offset));
         if len == 0 {
-            let ref mut myrq = sinner.rq;
-            myrq.try_wait();
+            drop(sinner);
+            let mut myrq = _data.rq.borrow_mut();
+            myrq.wait_event_interruptible(false);
             pr_info!("I am back\n");
         }
+        sinner = _data.scull_inner.lock();
         _writer.write_slice(&sinner.data[offset..][..len])?;
         Ok(len)
     }
@@ -119,7 +123,9 @@ impl file::Operations for Scull {
             vec.data.try_resize(new_len, 0)?;
         }
         _reader.read_slice(&mut vec.data[offset..][..len])?;
-        vec.rq.try_wake();
+        let mut myrq = _data.rq.borrow_mut();
+        pr_info!("before wake\n");
+        myrq.try_wake();
         pr_info!("wake up a reader\n");
         Ok(len)
     }

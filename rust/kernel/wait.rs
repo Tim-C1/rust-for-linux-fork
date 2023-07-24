@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::bindings::lock_class_key;
+// use crate::bindings::lock_class_key;
 use crate::bindings::wait_queue_head;
 use crate::pr_info;
 use crate::Result;
@@ -13,16 +13,18 @@ pub struct WaitQueue {
 unsafe impl Sync for WaitQueue {}
 unsafe impl Send for WaitQueue {}
 
+static mut __KEY: *mut bindings::lock_class_key = core::ptr::null_mut() as *mut _; 
 impl WaitQueue {
     /// try new
     pub fn try_new(name: fmt::Arguments<'_>) -> Result<WaitQueue> {
         unsafe {
-            let mut __key = lock_class_key::default();
+            let mut __key_d = bindings::lock_class_key::default();
+            __KEY = &mut __key_d as *mut _;
             let mut wq = wait_queue_head::default();
             bindings::__init_waitqueue_head(
                 &mut wq as *mut _,
                 &name as *const _ as *const core::ffi::c_char,
-                &mut __key as *mut _,
+                __KEY,
             );
             return Ok(WaitQueue { bindings: wq });
         };
@@ -45,12 +47,13 @@ impl WaitQueue {
             let mut __wq_entry = bindings::wait_queue_entry::default();
             unsafe { bindings::init_wait_entry(&mut __wq_entry as *mut _, 0) };
             loop {
+                pr_info!("before prepare to wait\n");
                 let __int: i64 = unsafe { bindings::prepare_to_wait_event(
                     &mut self.bindings as *mut _,
                     &mut __wq_entry as *mut _,
                     state,
                 ) };
-
+                pr_info!("after prepare to wait\n");
                 if cond {
                     break;
                 }
@@ -73,7 +76,7 @@ impl WaitQueue {
                 &mut self.bindings as *mut _,
                 bindings::TASK_NORMAL,
                 1,
-                core::ptr::null_mut() as *mut _ as *mut core::ffi::c_void,
+                core::ptr::null_mut() as *mut _,
             );
         }
         pr_info!("finish wake up");
